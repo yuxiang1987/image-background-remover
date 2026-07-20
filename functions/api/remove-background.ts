@@ -1,21 +1,10 @@
-/** Cloudflare Worker entry point for the vinext-starter template. */
-import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
-import handler from "vinext/server/app-router-entry";
-
 interface Env {
-  ASSETS: Fetcher;
   REMOVE_BG_API_KEY?: string;
   TURNSTILE_SECRET_KEY?: string;
   ALLOWED_ORIGIN?: string;
-  IMAGES: {
-    input(stream: ReadableStream): {
-      transform(options: Record<string, unknown>): {
-        output(options: { format: string; quality: number }): Promise<{ response(): Response }>;
-      };
-    };
-  };
 }
 
+type PagesContext = { request: Request; env: Env };
 const rateLimits = new Map<string, { minute: number[]; day: number[] }>();
 const MAX_FILE_SIZE = 12 * 1024 * 1024;
 
@@ -30,7 +19,7 @@ function validSignature(bytes: Uint8Array) {
   return jpeg || png || webp;
 }
 
-async function removeBackground(request: Request, env: Env) {
+export async function onRequestPost({ request, env }: PagesContext) {
   const requestId = crypto.randomUUID();
   const origin = request.headers.get("Origin");
   if (env.ALLOWED_ORIGIN && origin && origin !== env.ALLOWED_ORIGIN) return jsonError(403, "INVALID_ORIGIN", "This request origin is not allowed.", requestId);
@@ -58,8 +47,8 @@ async function removeBackground(request: Request, env: Env) {
     verification.append("secret", env.TURNSTILE_SECRET_KEY);
     verification.append("response", typeof token === "string" ? token : "");
     verification.append("remoteip", ip);
-    const turnstile = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", { method: "POST", body: verification });
-    const result = await turnstile.json() as { success?: boolean };
+    const response = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", { method: "POST", body: verification });
+    const result = await response.json() as { success?: boolean };
     if (!result.success) return jsonError(403, "VERIFICATION_FAILED", "Security verification failed. Please try again.", requestId);
   }
   if (!env.REMOVE_BG_API_KEY) return jsonError(503, "SERVICE_NOT_CONFIGURED", "Image processing is not configured yet.", requestId);
@@ -68,9 +57,9 @@ async function removeBackground(request: Request, env: Env) {
   upstreamForm.append("image_file", image, "upload");
   upstreamForm.append("size", "auto");
   let upstream: Response;
-  try {
-    upstream = await fetch("https://api.remove.bg/v1.0/removebg", { method: "POST", headers: { "X-Api-Key": env.REMOVE_BG_API_KEY }, body: upstreamForm, signal: AbortSignal.timeout(28_000) });
-  } catch { return jsonError(504, "UPSTREAM_TIMEOUT", "Processing took too long. Please try again.", requestId); }
+  try { upstream = await fetch("https://api.remove.bg/v1.0/removebg", { method: "POST", headers: { "X-Api-Key": env.REMOVE_BG_API_KEY }, body: upstreamForm, signal: AbortSignal.timeout(28_000) }); }
+  catch { return jsonError(504, "UPSTREAM_TIMEOUT", "Processing took too long. Please try again.", requestId); }
+
   if (!upstream.ok) {
     if (upstream.status === 429) return jsonError(429, "RATE_LIMITED", "The service is busy. Please try again shortly.", requestId, { "Retry-After": upstream.headers.get("Retry-After") || "60" });
     if (upstream.status === 402 || upstream.status === 403) return jsonError(503, "CREDITS_EXHAUSTED", "The service is temporarily unavailable. Please try again later.", requestId);
@@ -80,39 +69,6 @@ async function removeBackground(request: Request, env: Env) {
   return new Response(upstream.body, { status: 200, headers: { "Content-Type": upstream.headers.get("Content-Type") || "image/png", "Cache-Control": "no-store", "X-Request-ID": requestId, "X-Content-Type-Options": "nosniff" } });
 }
 
-interface ExecutionContext {
-  waitUntil(promise: Promise<unknown>): void;
-  passThroughOnException(): void;
+export function onRequest() {
+  return jsonError(405, "METHOD_NOT_ALLOWED", "Only POST requests are accepted.", crypto.randomUUID(), { Allow: "POST" });
 }
-
-// Image security config. SVG sources with .svg extension auto-skip the
-// optimization endpoint on the client side (served directly, no proxy).
-// To route SVGs through the optimizer (with security headers), set
-// dangerouslyAllowSVG: true in next.config.js and uncomment below:
-// const imageConfig: ImageConfig = { dangerouslyAllowSVG: true };
-
-const worker = {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const url = new URL(request.url);
-
-    if (url.pathname === "/api/remove-background") {
-      if (request.method !== "POST") return jsonError(405, "METHOD_NOT_ALLOWED", "Only POST requests are accepted.", crypto.randomUUID(), { Allow: "POST" });
-      return removeBackground(request, env);
-    }
-
-    if (url.pathname === "/_vinext/image") {
-      const allowedWidths = [...DEFAULT_DEVICE_SIZES, ...DEFAULT_IMAGE_SIZES];
-      return handleImageOptimization(request, {
-        fetchAsset: (path) => env.ASSETS.fetch(new Request(new URL(path, request.url))),
-        transformImage: async (body, { width, format, quality }) => {
-          const result = await env.IMAGES.input(body).transform(width > 0 ? { width } : {}).output({ format, quality });
-          return result.response();
-        },
-      }, allowedWidths);
-    }
-
-    return handler.fetch(request, env, ctx);
-  },
-};
-
-export default worker;
