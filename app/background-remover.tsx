@@ -66,19 +66,20 @@ export default function BackgroundRemover() {
   }, [chooseFile]);
 
   const processImage = async () => {
-    if (!file) return;
+    if (!file || stage === "uploading" || stage === "processing" || stage === "verifying") return;
     setStage("verifying"); setError("");
     const turnstileToken = (document.querySelector<HTMLInputElement>('[name="cf-turnstile-response"]')?.value || "development");
     const body = new FormData();
     body.append("image_file", file);
     body.append("turnstile_token", turnstileToken);
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 45000);
     try {
       setStage("uploading");
-      const controller = new AbortController();
-      const timer = window.setTimeout(() => controller.abort(), 30000);
+      // The upload and remove.bg processing happen in one request, so switch to
+      // the processing state as soon as the request has been dispatched.
+      window.setTimeout(() => setStage((current) => current === "uploading" ? "processing" : current), 300);
       const response = await fetch("/api/remove-background", { method: "POST", body, signal: controller.signal });
-      window.clearTimeout(timer);
-      setStage("processing");
       if (!response.ok) {
         const payload = await response.json().catch(() => null) as { error?: { message?: string } } | null;
         throw new Error(payload?.error?.message || "We couldn't process this image. Please try again.");
@@ -89,6 +90,8 @@ export default function BackgroundRemover() {
     } catch (reason) {
       setStage("error");
       setError(reason instanceof DOMException && reason.name === "AbortError" ? "Processing took too long. Please check your connection and try again." : reason instanceof Error ? reason.message : "Something went wrong. Please try again.");
+    } finally {
+      window.clearTimeout(timer);
     }
   };
 
@@ -127,7 +130,7 @@ export default function BackgroundRemover() {
             <div className="preview-grid">
               <figure><figcaption>Original</figcaption><div className="image-stage original-stage">{/* User-generated Blob URLs cannot use the Next image optimizer. */}<img src={originalUrl} alt="Original upload preview" /></div></figure>
               <figure><figcaption>Result</figcaption><div className={`image-stage result-stage ${background === "transparent" ? "checkerboard" : ""}`} style={{ backgroundColor: previewBg }}>
-                {resultUrl ? <>{/* User-generated Blob URLs cannot use the Next image optimizer. */}<img ref={resultRef} src={resultUrl} alt="Image with its background removed" /></> : <div className="processing" role="status" aria-live="polite"><span className="spinner" /><strong>{stage === "error" ? "Processing paused" : stage === "selected" ? "Ready when you are" : stage === "verifying" ? "Checking request…" : stage === "uploading" ? "Uploading securely…" : "Removing background…"}</strong><small>{stage === "selected" ? "Your image is not stored by us." : "This usually takes a few seconds."}</small></div>}
+                {resultUrl ? <>{/* User-generated Blob URLs cannot use the Next image optimizer. */}<img ref={resultRef} src={resultUrl} alt="Image with its background removed" /></> : <div className="processing" role="status" aria-live="polite">{stage !== "selected" && stage !== "error" && <span className="spinner" />}<strong>{stage === "error" ? "Processing paused" : stage === "selected" ? "Ready when you are" : stage === "verifying" ? "Checking request…" : stage === "uploading" ? "Uploading securely…" : "Removing background…"}</strong><small>{stage === "selected" ? "Click Remove background to start." : stage === "error" ? "Review the message below and try again." : "This usually takes a few seconds."}</small></div>}
               </div></figure>
             </div>
             {stage === "completed" && <div className="editor-bar"><div className="background-options" role="group" aria-label="Background color">
