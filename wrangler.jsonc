@@ -1,7 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "image-background-remover",
-  "account_id": "61802d4c0489dfd22a51f904f109de3e",
   "compatibility_date": "2026-07-20",
   "compatibility_flags": ["nodejs_compat"],
   "pages_build_output_dir": "./out"
